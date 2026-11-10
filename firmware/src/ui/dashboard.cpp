@@ -725,6 +725,7 @@ void presentFrame() {
     frameStats.skipped++;
     return;
   }
+  lcd.teWait(100);  // TE 同步实验：等 V-blank 起点再开始写（超时 100ms 就照写，不卡死）
   frameStats.drawn++;
   if (n < 0) {  // 首帧 / 区间过多：整屏
     u8g2->sendBuffer();
@@ -742,10 +743,13 @@ void presentFrame() {
 void logFrameStats(uint32_t now) {
   if (now - lastFrameStatsMs < 60000) return;
   lastFrameStatsMs = now;
-  Serial.printf("[ui] 近60秒：画了%lu帧（局部%lu/整屏%lu） 跳过%lu帧 发送%lu字节\n",
+  Serial.printf("[ui] 近60秒：画了%lu帧（局部%lu/整屏%lu） 跳过%lu帧 发送%lu字节 TE等到%lu次 超时%lu次\n",
                 static_cast<unsigned long>(frameStats.drawn), static_cast<unsigned long>(frameStats.partial),
                 static_cast<unsigned long>(frameStats.full), static_cast<unsigned long>(frameStats.skipped),
-                static_cast<unsigned long>(frameStats.bytes));
+                static_cast<unsigned long>(frameStats.bytes), static_cast<unsigned long>(lcd.teWaits),
+                static_cast<unsigned long>(lcd.teTimeouts));
+  lcd.teWaits = 0;
+  lcd.teTimeouts = 0;
   frameStats.reset();
 }
 
@@ -771,6 +775,7 @@ void uiBegin() {
 
   lcd.begin(0, U8G2_R1);  // 横屏 400x300
   u8g2 = lcd.getU8g2();
+  lcd.teBegin(PIN_RLCD_TE);  // TE 同步实验（见 ST7305_U8g2.cpp）
   u8g2->setFont(kFontSmall);
   u8g2->setDrawColor(1);
 

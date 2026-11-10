@@ -34,4 +34,18 @@ public:
   void fullInit();
 
   U8G2 *getU8g2() { return &u8g2_wrapper; }
+
+  // ===== TE 同步（临时实验，可整体删除）=====
+  // 初始化后调用：采样 TE 引脚判断是否在翻转、脉冲极性。不翻转则 teWait() 直接返回 false（不等待）。
+  void teBegin(int tePin);
+  // 等 TE 脉冲起点（面板进入 V-blank），最多等 timeoutMs。返回 true=等到；false=超时/TE 不可用。
+  bool teWait(uint32_t timeoutMs);
+  uint32_t teWaits = 0;     // 等到的次数
+  uint32_t teTimeouts = 0;  // 超时次数
+  bool teActive() const { return _teActive; }
+
+private:
+  int _tePin = -1;
+  bool _teActive = false;
+  bool _tePulseHigh = true;  // 脉冲极性：true = 高电平脉冲（V-blank 为高）
 };

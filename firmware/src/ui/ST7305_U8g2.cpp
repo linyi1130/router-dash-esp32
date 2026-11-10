@@ -253,3 +253,42 @@ void ST7305_U8g2::fullInit()
   _cmd(0x38);
   _cmd(0x29);
 }
+
+// ===== TE 同步（临时实验，可整体删除）=====
+void ST7305_U8g2::teBegin(int tePin)
+{
+  _tePin = tePin;
+  pinMode(_tePin, INPUT);
+  // 采样 400ms：统计高电平次数和跳变次数；少数电平 = 脉冲。
+  uint32_t high = 0, total = 0, edges = 0;
+  int last = digitalRead(_tePin);
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 400) {
+    const int v = digitalRead(_tePin);
+    if (v != last) { edges++; last = v; }
+    if (v) high++;
+    total++;
+    delayMicroseconds(100);
+  }
+  _teActive = edges >= 4;  // 400ms 内至少 2 个完整脉冲
+  _tePulseHigh = total > 0 && high * 2 <= total;  // 高电平占少数 → 高电平脉冲
+  Serial.printf("[te] GPIO%d 400ms 采样：跳变%lu次 高电平占%lu%% → %s\n", _tePin, (unsigned long)edges,
+                (unsigned long)(total ? high * 100 / total : 0),
+                _teActive ? (_tePulseHigh ? "TE 可用（高电平脉冲）" : "TE 可用（低电平脉冲）") : "TE 不翻转，禁用同步");
+}
+
+bool ST7305_U8g2::teWait(uint32_t timeoutMs)
+{
+  if (!_teActive) return false;
+  const uint32_t t0 = millis();
+  const int idle = _tePulseHigh ? LOW : HIGH;
+  // 先等回到空闲电平（若正好在脉冲中，等它结束，再等下一个脉冲起点，保证从 V-blank 开头开始写）
+  while (digitalRead(_tePin) != idle) {
+    if (millis() - t0 > timeoutMs) { teTimeouts++; return false; }
+  }
+  while (digitalRead(_tePin) == idle) {
+    if (millis() - t0 > timeoutMs) { teTimeouts++; return false; }
+  }
+  teWaits++;
+  return true;
+}

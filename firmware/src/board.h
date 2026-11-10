@@ -12,6 +12,7 @@ static constexpr int PIN_RLCD_MOSI = 12;
 static constexpr int PIN_RLCD_DC = 5;
 static constexpr int PIN_RLCD_CS = 40;
 static constexpr int PIN_RLCD_RST = 41;
+static constexpr int PIN_RLCD_TE = 6;   // ST7305 TE（撕裂效应）输出，原理图网络 LCD_TE
 
 // 按键（低电平按下）。BOOT=GPIO0，KEY=GPIO18。
 static constexpr int PIN_BTN_BOOT = 0;
