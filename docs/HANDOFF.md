@@ -9,7 +9,7 @@
 - 读取 Clash REST API，显示代理流量、连接数、内存、当前节点、延迟等。
 - 读取路由器 WAN 口总流量（UPnP IGD，不登录后台；区分"直连"与"代理"流量）。
 - 显示"网络信息"：国内出口 IP 与全球节点出口 IP（含归属地）。
-- 单色反射屏，横屏 400×300，两页切换。
+- 单色反射屏，横屏 400×300，四页：监视 0/1、伴侣页、对话列表。
 
 ## 2. 硬件
 
@@ -26,8 +26,8 @@
 | 引脚 | 用途 |
 |------|------|
 | GPIO11 / 12 / 5 / 40 / 41 | SCK / MOSI / DC / CS / RST |
-| GPIO0 | BOOT 按键（短按息屏/亮屏） |
-| GPIO18 | KEY 按键（短按切页 / 长按息屏） |
+| GPIO0 | BOOT 按键（短按回到/切换监视页；不再息屏） |
+| GPIO18 | KEY 按键（短按伴侣页/列表切换，长按息屏/亮屏） |
 
 ## 3. 工具链与烧录
 
@@ -71,9 +71,14 @@ firmware/
       battery_logic.h       # 电压->百分比曲线、EMA、±1% 滞回、5 分钟趋势充电推断（纯逻辑，host_test 覆盖）
       power.cpp/.h          # 市电/电池两档刷新频率：powerIv() 取当前周期，powerLoop() 切档
       power_logic.h         # 两档周期表 + 切档状态机（纯逻辑，host_test 覆盖）
+    audio/
+      beep_logic.h          # running→complete 才响、执行中加快轮询（纯逻辑，host_test 覆盖）
+      es8311_beep.cpp/.h    # ES8311 + I2S 短提示音，功放只在发声时打开
     ui/
       ST7305_U8g2.cpp/.h    # 自定义 ST7305 驱动
-      dashboard.cpp/.h      # 布局与绘制（两页 + 按键）
+      dashboard.cpp/.h      # 布局与绘制（监视两页 + 伴侣页/列表 + 按键）
+      page_logic.h          # 按键状态机与相对时间（纯逻辑，host_test 覆盖）
+      pet_sprites.h         # 官方 codex 宠物 1-bit 精灵（由 tools/gen_pet_sprites.py 生成）
 ```
 
 ## 5. 数据源与架构
@@ -122,8 +127,10 @@ firmware/
   2. 网络信息左右两列：左 `国内`、右 `全球`，各含 IP + 归属地。
   3. 延迟 5 行：Baidu / CF / OpenAI / Github / YouTube（状态方块 + ms 值）。
 - **第二页（page 1）**：当前节点 + 下载最多 + 上传最多。
-- 按键：KEY 短按切页 / 长按息屏；BOOT 短按息屏。
-- 无折线图、无版本号、无页脚（均已按用户反馈移除）。
+- **伴侣页（page 2）**：官方 `codex` 宠物 1-bit 精灵 + 焦点对话气泡 + 计数/本周/电池页脚。
+- **对话列表（page 3）**：最多 8 条只读对话，按优先级排列。
+- 按键：KEY 短按打开伴侣页，再按在宠物/列表间切换；KEY 长按息屏/亮屏；BOOT 短按回到监视页（已在监视页则在 page 0/1 间切换）。BOOT 短按不再息屏。
+- 无折线图、无版本号；监视页无页脚（均已按用户反馈移除）。伴侣页/列表有自己的页脚。
 
 ## 8. 完成状态
 
@@ -255,3 +262,29 @@ firmware/
 - 驱动的 DRAW_TILE 回调支持任意 `x_pos/cnt`（按 12 像素列组发送），所以 `updateDisplayArea` 可用。
 - `src/ui/frame_diff.h`（纯逻辑，`host_test/test_frame_diff.cpp`）比较上一帧拷贝与当前缓冲：相同则跳过；不同只发变化图块段（同行相距 ≤2 图块合并）；首帧/重新点亮/段数 >160 整屏。
 - 串口每 60 秒 `[ui] 近60秒：画了N帧（局部/整屏） 跳过N帧 发送N字节`。
+
+## 16. Codex 伴侣页（显示-only）
+
+Q 批准了预览 `sheet.png`，选用内置 `codex` 蓝毛球。v1 只展现，不向 Codex 回写，也不走 app-server。
+
+### 16.1 sidecar（`~/Developer/codex-desk-status`）
+- 新模块 `host/thread_status.py`：只读短连接打开 `~/.codex/state_5.sqlite` 与 `thread_history_1.sqlite`（`file:?mode=ro`），标题来自 `session_index.jsonl` 的 `thread_name`，否则用 `threads.title`（截到约 32 字）。**绝不**输出 `first_user_message`。
+- `/status` 向后兼容，新增：`pet_state`、`pet_label`、`pet_title`、`pet_thread_id`、`pet_age_s`、`counts`（needs_input/blocked/ready/running/idle）、`threads[]`（最多 8 条 `{id,state,title,age_s}`）。监视页仍只用旧字段。
+- 归类：只看 Codex 源（`Codex Desktop` / `codex_exec` / `codex_work_desktop`），排除归档和子代理源；子代理 `inProgress`（未过期）可把父会话标成 running，子代理 failed **不**把父会话打成 blocked；`interrupted` → idle；短时间内失败的 `codex_exec`（闪崩）→ idle；`inProgress` 超过 30 分钟无更新 → idle；blocked 超过 24 小时 → idle；ready（未读）超过 3 天 → idle；优先级 needs_input > running > blocked > ready > idle，同级取最近活动。有任务在跑时，不因旁边的命令行失败显示「出错了」。
+- `needs_input` 目前主要来自 hook 的 `PermissionRequest`（detail「等待确认」）。`hooks/hooks.json.example` 已加上该条目，**不要**自行安装到 `~/.codex/hooks.json`，除非 Q 明确要求。
+- 测试：`python3 -m unittest discover -s host -v`（含 `host/test_thread_status.py` 夹具库，不读真实用户文本）。
+
+### 16.2 固件
+- `net/codex_client.cpp` 的 ArduinoJson filter 增补 `pet_*`、`counts`、`threads[0].{id,state,title,age_s}`。
+- 新页：`ui/page_logic.h`（按键状态机 + `刚才/N分钟/N小时/昨天/N天前`，host_test 覆盖）、`ui/pet_sprites.h`（6 帧 128×139、16 字节/行、MSB 在左，`u8g2.drawBitmap`）。
+- 精灵由 `firmware/tools/gen_pet_sprites.py` 从官方 ChatGPT.app `codex-spritesheet-v6` 图集再生：白底合成、LANCZOS 缩到 128×139、Floyd-Steinberg，不全局压暗。仓库不收彩色原图。
+- 精灵只在状态变化（以及市电档 running 每 2 秒换一帧）时改像素；电池档 running 只用第 1 帧。帧差分 / TE 同步逻辑未改，换页或链路变化仍立即重绘。
+- 按键见第 7 节。测试：`cd firmware/host_test && g++ -std=c++17 -Wall -Wextra -I../src/ui test_page_logic.cpp -o /tmp/test_page_logic && /tmp/test_page_logic`，再加上原有 host_test。
+- 编译：`cd firmware && ~/.codex-desk-pio-venv/bin/pio run`。已烧录到 Waveshare RLCD-4.2。
+
+## 17. Codex 完成提示音
+
+任务主窗口从 `running` 变为 `complete` 时，通过板载 ES8311 和 MX1.25 SPK 座播放一段约 2 秒的原创短旋律（C5–D5–E5–G5–E5–D5–C5–E5–G5）。看的是 `/status` 的 `status` 字段，不是 `pet_state`。开机或重连后的第一帧、中断、切到已经是 complete 的窗口，都不响完成提示；开机时会单独试听同一段旋律，方便确认喇叭。任务在跑时把 Codex 轮询加快到 1 秒（电池档默认 30 秒会把提示音拖晚）。HTTP 超时 2.5 秒。功放（GPIO46）只在发声时拉高。已烧录到 Waveshare RLCD-4.2。
+
+- 测试：`cd firmware/host_test && g++ -std=c++17 -Wall -Wextra -I../src test_beep_logic.cpp -o /tmp/test_beep_logic && /tmp/test_beep_logic`
+- 编译与烧录：`cd firmware && ~/.codex-desk-pio-venv/bin/pio run`，`pio run -t upload -p /dev/cu.usbmodem21101`

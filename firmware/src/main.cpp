@@ -12,6 +12,7 @@
 #include "net/ipinfo_client.h"
 #include "state.h"
 #include "ui/dashboard.h"
+#include "audio/es8311_beep.h"
 
 #if __has_include("config.h")
 #include "config.h"
@@ -39,6 +40,9 @@ void setup() {
   uiBegin();
   powerBegin();
   battBegin();
+  beepBegin();
+  beepRequest();
+  beepLoop();  // 开机试听一声，确认喇叭有声
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(WIFI_PS_MIN_MODEM);
@@ -85,6 +89,7 @@ void loop() {
     }
     battLoop();
     powerLoop();
+    beepLoop();
     uiLoop();
     delay(20);
     return;
@@ -106,6 +111,7 @@ void loop() {
   codexLoop();
   battLoop();
   powerLoop();
+  beepLoop();
 
   if (now - g.lastSampleMs >= 1000) {
     g.lastSampleMs = now;

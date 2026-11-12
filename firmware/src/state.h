@@ -23,6 +23,13 @@ enum GrokState : uint8_t {
   GROK_UNAVAILABLE,  // 读不到（未登录/格式不认识）
 };
 
+struct CodexThread {
+  char id[40] = "";
+  char state[16] = "";
+  char title[104] = "";
+  int32_t ageS = 0;
+};
+
 struct CodexState {
   bool authFailed = false;      // sidecar 返回 401（令牌不对）
   bool everSynced = false;
@@ -46,6 +53,20 @@ struct CodexState {
   GrokState grokState = GROK_UNKNOWN;
   float grokPercent = -1.0f;    // 最近一次读到的周用量，<0 未知
   int64_t grokResetUnix = 0;    // 0 = 未知
+
+  // 伴侣页（sidecar 新增的只读摘要；缺省时当 idle）。
+  char petState[16] = "";       // needs_input/blocked/ready/running/idle
+  char petLabel[24] = "";
+  char petTitle[104] = "";      // 最多约 32 个 UTF-8 字符
+  char petThreadId[40] = "";
+  int32_t petAgeS = 0;
+  int16_t countNeedsInput = 0;
+  int16_t countBlocked = 0;
+  int16_t countReady = 0;
+  int16_t countRunning = 0;
+  int16_t countIdle = 0;
+  CodexThread threads[8];
+  int8_t threadCount = 0;
 };
 
 struct TopHost {
@@ -100,7 +121,7 @@ struct DashState {
   bool battCharging = false; // 推断值（充电芯片状态没接到 GPIO）
   bool powerBattery = false; // true = 电池档（低频刷新），false = 市电档（默认）
 
-  int page = 0;  // 0 主屏, 1 第二页
+  int page = 0;  // 0/1 监视页，2 伴侣页，3 对话列表
   bool screenOn = true;
   uint8_t brightness = 150;
   uint32_t lastSampleMs = 0;

@@ -10,6 +10,9 @@
 
 #include "power.h"
 
+#include "audio/beep_logic.h"
+#include "audio/es8311_beep.h"
+
 #if __has_include("config.h")
 #include "config.h"
 #else
@@ -41,8 +44,8 @@
 
 namespace {
 
-constexpr uint32_t kConnectTimeoutMs = 800;
-constexpr uint32_t kReadTimeoutMs = 800;
+constexpr uint32_t kConnectTimeoutMs = 2500;
+constexpr uint32_t kReadTimeoutMs = 2500;
 constexpr uint32_t kRediscoverMs = 60000;   // 连续失败后重新解析 mDNS 的最短间隔
 constexpr uint32_t kNoHostRetryMs = 30000;  // 一直没有地址时的重试间隔
 constexpr uint32_t kMdnsQueryMs = 1000;
@@ -81,7 +84,7 @@ bool discover() {
 }
 
 void copyClean(char* dst, size_t cap, const char* src) {
-  char tmp[96];
+  char tmp[128];
   sanitizeUtf8(tmp, sizeof(tmp), src);
   normalizeGlyphs(tmp);
   strlcpy(dst, tmp, cap);
@@ -109,6 +112,20 @@ bool applyJson(const String& body) {
   filter["grok"]["state"] = true;
   filter["grok"]["weekly_percent"] = true;
   filter["grok"]["next_reset_unix"] = true;
+  filter["pet_state"] = true;
+  filter["pet_label"] = true;
+  filter["pet_title"] = true;
+  filter["pet_thread_id"] = true;
+  filter["pet_age_s"] = true;
+  filter["counts"]["needs_input"] = true;
+  filter["counts"]["blocked"] = true;
+  filter["counts"]["ready"] = true;
+  filter["counts"]["running"] = true;
+  filter["counts"]["idle"] = true;
+  filter["threads"][0]["id"] = true;
+  filter["threads"][0]["state"] = true;
+  filter["threads"][0]["title"] = true;
+  filter["threads"][0]["age_s"] = true;
 
   JsonDocument doc;
   if (deserializeJson(doc, body, DeserializationOption::Filter(filter)) != DeserializationError::Ok) {
@@ -119,6 +136,9 @@ bool applyJson(const String& body) {
   if (unixNow <= 0) return false;  // 不是 sidecar 的正常响应
 
   CodexState& c = g.codex;
+  const bool prevValid = c.everSynced;
+  char prevStatus[16];
+  strlcpy(prevStatus, c.status, sizeof(prevStatus));
   copyClean(c.status, sizeof(c.status), doc["status"] | "idle");
   copyClean(c.label, sizeof(c.label), doc["label"] | "");
   const char* windowName = doc["window_name"] | "";
@@ -166,6 +186,31 @@ bool applyJson(const String& body) {
   else c.grokState = GROK_UNKNOWN;
   if (!doc["grok"]["weekly_percent"].isNull()) c.grokPercent = doc["grok"]["weekly_percent"].as<float>();
   if (!doc["grok"]["next_reset_unix"].isNull()) c.grokResetUnix = doc["grok"]["next_reset_unix"].as<int64_t>();
+
+  copyClean(c.petState, sizeof(c.petState), doc["pet_state"] | "idle");
+  copyClean(c.petLabel, sizeof(c.petLabel), doc["pet_label"] | "");
+  copyClean(c.petTitle, sizeof(c.petTitle), doc["pet_title"] | "");
+  copyClean(c.petThreadId, sizeof(c.petThreadId), doc["pet_thread_id"] | "");
+  c.petAgeS = doc["pet_age_s"] | 0;
+  c.countNeedsInput = doc["counts"]["needs_input"] | 0;
+  c.countBlocked = doc["counts"]["blocked"] | 0;
+  c.countReady = doc["counts"]["ready"] | 0;
+  c.countRunning = doc["counts"]["running"] | 0;
+  c.countIdle = doc["counts"]["idle"] | 0;
+  c.threadCount = 0;
+  if (doc["threads"].is<JsonArray>()) {
+    for (JsonObject row : doc["threads"].as<JsonArray>()) {
+      if (c.threadCount >= 8) break;
+      CodexThread& t = c.threads[c.threadCount++];
+      copyClean(t.id, sizeof(t.id), row["id"] | "");
+      copyClean(t.state, sizeof(t.state), row["state"] | "idle");
+      copyClean(t.title, sizeof(t.title), row["title"] | "");
+      t.ageS = row["age_s"] | 0;
+    }
+  }
+  if (shouldBeepOnCodexStatus(prevValid, prevStatus, c.status)) {
+    beepRequest();
+  }
   return true;
 }
 
@@ -193,7 +238,7 @@ void onSuccess(uint32_t now) {
   failures = 0;
   g.codex.authFailed = false;
   g.codex.lastOkMs = now;
-  nextPollAt = now + powerIv().codexPollMs;
+  nextPollAt = now + codexPollMsForStatus(g.codex.status, powerIv().codexPollMs);
 }
 
 void onFailure(uint32_t now, int code) {

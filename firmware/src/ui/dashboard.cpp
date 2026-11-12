@@ -5,6 +5,8 @@
 
 #include "ST7305_U8g2.h"
 #include "frame_diff.h"
+#include "page_logic.h"
+#include "pet_sprites.h"
 #include "../board.h"
 #include "../net/codex_client.h"
 #include "../net/power.h"
@@ -88,8 +90,8 @@ constexpr int kCodexFooterY = 287;
 constexpr float kHighUsage = 85.0f;  // 用量 >= 此值：反白标题 + 粗边框进度条
 
 // ---- 按钮 ----
-constexpr int PIN_BTN_PAGE = PIN_BTN_KEY;   // KEY：短按切页，长按息屏/亮屏
-constexpr int PIN_BTN_POWER = PIN_BTN_BOOT; // BOOT：短按息屏/亮屏
+constexpr int PIN_BTN_PAGE = PIN_BTN_KEY;   // KEY：短按伴侣页/列表，长按息屏/亮屏
+constexpr int PIN_BTN_POWER = PIN_BTN_BOOT; // BOOT：短按回到/切换监视页（不再息屏）
 
 constexpr uint32_t kDebounceMs = 30;    // 消抖窗口
 constexpr uint32_t kLongPressMs = 700;  // 长按阈值
@@ -134,7 +136,7 @@ void readButton(Button& b, void (*onShort)(), void (*onLong)()) {
 }
 
 void onPageShort() {
-  g.page = 1 - g.page;
+  g.page = onKeyShort(g.page);
   lastPage = -1;
 }
 
@@ -151,7 +153,8 @@ void onPageLong() {
 }
 
 void onPowerShort() {
-  setScreenOn(!g.screenOn);
+  g.page = onBootShort(g.page);
+  lastPage = -1;
 }
 
 // ---- 格式化 ----
@@ -257,9 +260,13 @@ void drawSpeedUnit(int x, int y, bool up, int64_t bps) {
 }
 
 // 一行速度：中文标签 + 下载列 + 上传列。
-void drawSpeedRow(int y, const char* label, int64_t downBps, int64_t upBps) {
+void drawSpeedRow(int y, const char* label, int64_t downBps, int64_t upBps, const char* unavailable = nullptr) {
   setFont(kFontZh);
   u8g2->drawUTF8(kSpeedLabelX, y, label);
+  if (unavailable && unavailable[0]) {
+    u8g2->drawUTF8(kSpeedDownX, y, unavailable);
+    return;
+  }
   drawSpeedUnit(kSpeedDownX, y, false, downBps);
   drawSpeedUnit(kSpeedUpX, y, true, upBps);
 }
@@ -275,6 +282,8 @@ void drawNetCol(int x, const char* label, const char* ip, const char* loc) {
   setFont(kFontZh);
   if (loc && loc[0]) {
     drawUTF8Fit(x, kNetLocY, loc, kNetColW);
+  } else if (g.link == LINK_WIFI) {
+    u8g2->drawUTF8(x, kNetLocY, "未连接");
   } else {
     u8g2->drawUTF8(x, kNetLocY, "获取中...");
   }
@@ -293,9 +302,12 @@ void drawTopHostBlock(int y, const char* title, const TopHost& t) {
     formatBytes(buf, sizeof(buf), t.bytes);
     setFont(kFontSmall);
     u8g2->drawStr(12, y, buf);
+  } else if (g.link != LINK_OK) {
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, (g.link == LINK_WIFI) ? "Wi-Fi 未连接" : "代理未开启");
   } else {
-    setFont(kFontSmall);
-    u8g2->drawStr(12, y, "暂无");
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, "暂无");
   }
 }
 
@@ -364,6 +376,10 @@ void paintLatency() {
     u8g2->drawStr(kMargin, y, kLatNames[i]);
 
     const int16_t ms = g.latency[i];
+    if (ms < 0 && g.link != LINK_OK) {  // 代理或 Wi-Fi 不可用：不把失败画成「超时」
+      drawRight(kLatValRight, y, "--");
+      continue;
+    }
     if (ms == -2) {  // 未测
       drawRight(kLatValRight, y, "--");
       continue;
@@ -644,8 +660,14 @@ void paintBattery() {
 // ---- 页面 0：速度 + 网络信息 + 延迟/Grok + Codex ----
 void paintPage0() {
   // 速度两行：路由器 WAN 总流量 + Clash 代理流量。
-  drawSpeedRow(kWanSpeedY, "外网", g.wanDownSpeed, g.wanUpSpeed);
-  drawSpeedRow(kProxySpeedY, "代理", g.downSpeed, g.upSpeed);
+  // 代理没开或 Wi-Fi 断了时仍画整页，只把受影响的行标成不可用，不再整屏黑掉。
+  const char* wanMsg = (g.link == LINK_WIFI) ? "未连接" : nullptr;
+  const char* proxyMsg = nullptr;
+  if (g.link == LINK_WIFI) proxyMsg = "未连接";
+  else if (g.link == LINK_401) proxyMsg = "密码错误";
+  else if (g.link == LINK_DOWN) proxyMsg = "不可用";
+  drawSpeedRow(kWanSpeedY, "外网", g.wanDownSpeed, g.wanUpSpeed, wanMsg);
+  drawSpeedRow(kProxySpeedY, "代理", g.downSpeed, g.upSpeed, proxyMsg);
   paintBattery();
   u8g2->drawHLine(0, kSpeedDivY, kWidth);
 
@@ -667,12 +689,21 @@ void paintPage1() {
   setFont(kFontZh);
   u8g2->drawUTF8(12, y, "当前节点");
   y += 30;
-  if (g.currentNode[0]) {
+  if (g.link == LINK_WIFI) {
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, "Wi-Fi 未连接");
+  } else if (g.link == LINK_401) {
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, "代理密码错误");
+  } else if (g.link == LINK_DOWN) {
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, "代理未开启");
+  } else if (g.currentNode[0]) {
     setFont(kFontZh);
     drawUTF8Fit(12, y, g.currentNode, kWidth - 24);
   } else {
-    setFont(kFontSmall);
-    u8g2->drawStr(12, y, "获取中...");
+    setFont(kFontZh);
+    u8g2->drawUTF8(12, y, "获取中...");
   }
   y += 50;
 
@@ -695,6 +726,235 @@ void paintStatus() {
   drawStrCentered(kWidth / 2, 120, title);
   setFont(kFontSmall);
   drawStrCentered(kWidth / 2, 150, sub);
+}
+
+// ---- 伴侣页 / 对话列表（page 2 / 3，布局与批准的 preview 一致）----
+constexpr int kPetW = 128;
+constexpr int kPetH = 139;
+constexpr int kPetFooterY = 272;
+constexpr int kPetBattNubX = 388;
+constexpr int kPetBattY = 277;
+
+void chamferFrame(int x, int y, int w, int h, int cut) {
+  u8g2->drawHLine(x + cut, y, w - 2 * cut);
+  u8g2->drawHLine(x + cut, y + h - 1, w - 2 * cut);
+  u8g2->drawVLine(x, y + cut, h - 2 * cut);
+  u8g2->drawVLine(x + w - 1, y + cut, h - 2 * cut);
+  for (int k = 0; k < cut; k++) {
+    u8g2->drawPixel(x + cut - 1 - k, y + k);
+    u8g2->drawPixel(x + w - cut + k, y + k);
+    u8g2->drawPixel(x + cut - 1 - k, y + h - 1 - k);
+    u8g2->drawPixel(x + w - cut + k, y + h - 1 - k);
+  }
+}
+
+int iround(int num, int den) { return (num + den / 2) / den; }
+
+// 画气泡，返回尾巴底部的 y。
+int paintBubble(int cx, int top, const char* title, const char* label, bool invertLabel) {
+  setFont(kFontZh);
+  const int padX = 10, padY = 6, gap = 4, titleH = 16, stateH = 16, maxW = 340;
+  const int titleW = title && title[0] ? u8g2->getUTF8Width(title) : 0;
+  const int labelW = label && label[0] ? u8g2->getUTF8Width(label) : 0;
+  int innerW = titleW > labelW ? titleW : labelW;
+  const int cap = maxW - 2 * padX;
+  if (innerW > cap) innerW = cap;
+  if (innerW < 8) innerW = 8;
+  const int bw = innerW + 2 * padX;
+  const int bh = padY + titleH + gap + stateH + padY;
+  int x = cx - bw / 2;
+  if (x < 6) x = 6;
+  if (x + bw > kWidth - 6) x = kWidth - 6 - bw;
+  const int y = top;
+  chamferFrame(x, y, bw, bh, 3);
+
+  const int tailH = 6, half = 5;
+  int tx = cx;
+  if (tx < x + 12) tx = x + 12;
+  if (tx > x + bw - 12) tx = x + bw - 12;
+  u8g2->setDrawColor(0);
+  u8g2->drawHLine(tx - half, y + bh - 1, half * 2 + 1);
+  u8g2->setDrawColor(1);
+  for (int k = 0; k <= tailH; k++) {
+    const int inset = iround(half * k, tailH);
+    const int yy = y + bh - 1 + k;
+    u8g2->drawPixel(tx - half + inset, yy);
+    u8g2->drawPixel(tx + half - inset, yy);
+  }
+
+  setFont(kFontZh);
+  if (title && title[0]) drawUTF8Fit(x + padX, y + padY + 13, title, innerW);
+  const int sy = y + padY + titleH + gap + 13;
+  if (label && label[0]) {
+    if (invertLabel) {
+      const int sw = u8g2->getUTF8Width(label);
+      u8g2->drawBox(x + padX - 2, sy - 13, sw + 4, 16);
+      u8g2->setDrawColor(0);
+      u8g2->drawUTF8(x + padX, sy, label);
+      u8g2->setDrawColor(1);
+    } else {
+      u8g2->drawUTF8(x + padX, sy, label);
+    }
+  }
+  return y + bh - 1 + tailH;
+}
+
+// 画电池使正极凸起右缘落在 nubX。返回百分比（或闪电）左缘，给「本周」让位。
+int paintBatteryAt(int nubX, int y) {
+  if (!g.battValid || g.battPercent < 0) return nubX;
+  const int pct = g.battPercent > 100 ? 100 : g.battPercent;
+  const int bx = nubX - 2 - kBattW;
+  const int by = y;
+  u8g2->drawFrame(bx, by, kBattW, kBattH);
+  u8g2->drawBox(bx + kBattW, by + 4, 2, 5);
+  const int fw = (kBattW - 4) * pct / 100;
+  if (fw > 0) u8g2->drawBox(bx + 2, by + 2, fw, kBattH - 4);
+  char txt[8];
+  snprintf(txt, sizeof(txt), "%d%%", pct);
+  setFont(kFontSmall);
+  const int tw = u8g2->getStrWidth(txt);
+  const int tx = bx - 4 - tw;
+  const bool low = pct <= kBattLow;
+  if (low) {
+    u8g2->drawBox(tx - 3, by - 1, tw + 6, kBattH + 2);
+    u8g2->setDrawColor(0);
+    u8g2->drawStr(tx, by + 11, txt);
+    u8g2->setDrawColor(1);
+  } else {
+    u8g2->drawStr(tx, by + 11, txt);
+  }
+  if (g.battCharging) {
+    const int boltX = tx - 10 - (low ? 3 : 0);
+    for (const auto& p : kBolt) u8g2->drawPixel(boltX + p[0], by + 1 + p[1]);
+    return boltX;
+  }
+  return tx;
+}
+
+void paintPetFooter() {
+  u8g2->drawHLine(0, kPetFooterY, kWidth);
+  setFont(kFontZh);
+  const CodexState& c = g.codex;
+  char counts[64];
+  snprintf(counts, sizeof(counts), "待回复 %d   出错 %d   已完成 %d   运行中 %d",
+           c.countNeedsInput, c.countBlocked, c.countReady, c.countRunning);
+  u8g2->drawUTF8(8, 291, counts);
+  const int left = paintBatteryAt(kPetBattNubX, kPetBattY);
+  setFont(kFontZh);
+  char week[20];
+  if (c.weekly < 0) snprintf(week, sizeof(week), "本周 --");
+  else snprintf(week, sizeof(week), "本周 %d%%", static_cast<int>(c.weekly + 0.5f));
+  const int ww = u8g2->getUTF8Width(week);
+  u8g2->drawUTF8(left - 10 - ww, 291, week);
+}
+
+void petHeadline(char* title, size_t tcap, char* label, size_t lcap, const char** stateOut) {
+  const CodexState& c = g.codex;
+  const char* state = c.petState[0] ? c.petState : "idle";
+  const CodexLink link = codexLinkNow();
+  if (c.authFailed) {
+    strlcpy(title, "令牌错误", tcap);
+    strlcpy(label, "空闲", lcap);
+    *stateOut = "idle";
+    return;
+  }
+  if (link == CODEX_NEVER) {
+    strlcpy(title, "等待连接", tcap);
+    strlcpy(label, "空闲", lcap);
+    *stateOut = "idle";
+    return;
+  }
+  if (link == CODEX_STALE) {
+    strlcpy(title, "连接中断", tcap);
+    strlcpy(label, "空闲", lcap);
+    *stateOut = "idle";
+    return;
+  }
+  if (c.petTitle[0]) strlcpy(title, c.petTitle, tcap);
+  else strlcpy(title, "未命名", tcap);
+  if (c.petLabel[0]) strlcpy(label, c.petLabel, lcap);
+  else strlcpy(label, petLabelFor(state), lcap);
+  *stateOut = state;
+}
+
+void paintPetPage() {
+  char title[104];
+  char label[24];
+  const char* state = "idle";
+  petHeadline(title, sizeof(title), label, sizeof(label), &state);
+  const bool invert = strcmp(state, "needs_input") == 0;
+  const int petX = (kWidth - kPetW) / 2;
+  const int tailBelow = paintBubble(petX + kPetW / 2, 8, title, label, invert);
+  int petY = tailBelow + 4;
+  if (petY < 70) petY = 70;
+  if (petY + kPetH > 268) petY = 268 - kPetH;
+  const bool alt = runningAltFrame(millis(), !g.powerBattery, state);
+  const int frame = petFrameFor(state, alt);
+  u8g2->drawBitmap(petX, petY, kPetSpriteRowBytes, kPetSpriteH, petSpriteBits(frame));
+  paintPetFooter();
+}
+
+void iconNeeds(int x, int y) {
+  u8g2->drawFrame(x, y, 13, 13);
+  for (int dx = 4; dx <= 8; dx++) u8g2->drawPixel(x + dx, y + 2);
+  u8g2->drawPixel(x + 3, y + 3);
+  u8g2->drawPixel(x + 9, y + 3);
+  u8g2->drawPixel(x + 9, y + 4);
+  u8g2->drawPixel(x + 8, y + 5);
+  u8g2->drawPixel(x + 7, y + 6);
+  u8g2->drawPixel(x + 6, y + 7);
+  u8g2->drawPixel(x + 6, y + 10);
+}
+
+void iconBlocked(int x, int y) {
+  u8g2->drawFrame(x, y, 13, 13);
+  for (int k = 0; k < 7; k++) {
+    u8g2->drawPixel(x + 3 + k, y + 3 + k);
+    u8g2->drawPixel(x + 9 - k, y + 3 + k);
+  }
+}
+
+void iconReady(int x, int y) {
+  u8g2->drawFrame(x, y, 13, 13);
+  const int pts[][2] = {{3, 7}, {4, 8}, {5, 9}, {6, 8}, {7, 7}, {8, 6}, {9, 5}, {10, 4}};
+  for (const auto& p : pts) {
+    u8g2->drawPixel(x + p[0], y + p[1]);
+    u8g2->drawPixel(x + p[0], y + p[1] - 1);
+  }
+}
+
+void iconRunning(int x, int y) { u8g2->drawDisc(x + 6, y + 6, 5); }
+void iconIdle(int x, int y) { u8g2->drawCircle(x + 6, y + 6, 5); }
+
+void paintListIcon(const char* state, int x, int y) {
+  if (state && strcmp(state, "needs_input") == 0) iconNeeds(x, y);
+  else if (state && strcmp(state, "blocked") == 0) iconBlocked(x, y);
+  else if (state && strcmp(state, "ready") == 0) iconReady(x, y);
+  else if (state && strcmp(state, "running") == 0) iconRunning(x, y);
+  else iconIdle(x, y);
+}
+
+void paintListPage() {
+  setFont(kFontZh);
+  u8g2->drawUTF8(8, 22, "Codex 对话");
+  paintBatteryAt(kPetBattNubX, 10);
+  u8g2->drawHLine(0, 30, kWidth);
+  const CodexState& c = g.codex;
+  const int timeReserve = 50;
+  for (int i = 0; i < c.threadCount && i < 8; i++) {
+    const CodexThread& row = c.threads[i];
+    const int y = 48 + i * 28;
+    paintListIcon(row.state, 10, y - 12);
+    setFont(kFontZh);
+    char age[16];
+    formatPetAge(age, sizeof(age), row.ageS);
+    const int tw = u8g2->getUTF8Width(age);
+    u8g2->drawUTF8(kWidth - 8 - tw, y, age);
+    if (row.title[0]) drawUTF8Fit(28, y, row.title, kWidth - 8 - timeReserve - 28 - 6);
+  }
+  u8g2->drawHLine(0, 270, kWidth);
+  setFont(kFontZh);
+  u8g2->drawUTF8(8, 291, "再按 KEY 返回");
 }
 
 // ---- 帧提交：只在内容变化时发送，且只发变化的图块区间 ----
@@ -755,12 +1015,14 @@ void logFrameStats(uint32_t now) {
 
 void paintTo() {
   u8g2->clearBuffer();
-  if (g.link != LINK_OK) {
-    paintStatus();
-  } else if (g.page == 0) {
+  if (g.page == PAGE_MONITOR_0) {
     paintPage0();
-  } else {
+  } else if (g.page == PAGE_MONITOR_1) {
     paintPage1();
+  } else if (g.page == PAGE_PET) {
+    paintPetPage();
+  } else {
+    paintListPage();
   }
   presentFrame();
 }
